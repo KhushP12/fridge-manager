@@ -1,0 +1,96 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Fridge app backend - DynamoDB table, Lambda, REST API (API Gateway)
+
+Resources:
+  ItemsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+
+  FridgeApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: prod
+      Cors:
+        AllowMethods: "'GET,POST,DELETE,OPTIONS'"
+        AllowHeaders: "'Content-Type'"
+        AllowOrigin: "'*'"   # tighten to your Amplify domain once deployed
+
+  ItemsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Runtime: nodejs20.x
+      Handler: index.handler
+      Timeout: 10
+      MemorySize: 256
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref ItemsTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ItemsTable
+      Events:
+        List:
+          Type: Api
+          Properties: { RestApiId: !Ref FridgeApi, Path: /items, Method: GET }
+        Add:
+          Type: Api
+          Properties: { RestApiId: !Ref FridgeApi, Path: /items, Method: POST }
+        Remove:
+          Type: Api
+          Properties: { RestApiId: !Ref FridgeApi, Path: '/items/{id}', Method: DELETE }
+      InlineCode: |
+        const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
+        const { DynamoDBDocumentClient, ScanCommand, PutCommand, DeleteCommand } = require("@aws-sdk/lib-dynamodb");
+        const { randomUUID } = require("crypto");
+
+        const db = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+        const TABLE = process.env.TABLE_NAME;
+        const headers = { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" };
+        const reply = (code, body) => ({ statusCode: code, headers, body: JSON.stringify(body) });
+
+        exports.handler = async (event) => {
+          try {
+            const method = event.httpMethod;
+            if (method === "GET") {
+              const out = await db.send(new ScanCommand({ TableName: TABLE }));
+              const items = (out.Items || []).sort((a, b) => a.addedAt - b.addedAt);
+              return reply(200, { items });
+            }
+            if (method === "POST") {
+              let body;
+              try { body = JSON.parse(event.body || "{}"); } catch { return reply(400, { error: "Invalid JSON" }); }
+              const name = typeof body.name === "string" ? body.name.trim() : "";
+              const shelf = Number(body.shelf);
+              if (!name || name.length > 40) return reply(400, { error: "Name must be 1-40 characters" });
+              if (!Number.isInteger(shelf) || shelf < 0 || shelf > 3) return reply(400, { error: "Shelf must be 0-3" });
+              const item = { id: randomUUID(), name, shelf, addedAt: Date.now() };
+              await db.send(new PutCommand({ TableName: TABLE, Item: item }));
+              return reply(201, item);
+            }
+            if (method === "DELETE") {
+              const id = event.pathParameters && event.pathParameters.id;
+              if (!id) return reply(400, { error: "Missing id" });
+              await db.send(new DeleteCommand({ TableName: TABLE, Key: { id } }));
+              return reply(200, { deleted: id });
+            }
+            return reply(405, { error: "Method not allowed" });
+          } catch (err) {
+            console.error(err);
+            return reply(500, { error: "Server error" });
+          }
+        };
+
+Outputs:
+  ApiUrl:
+    Description: Paste this into API_URL in index.html
+    Value: !Sub "https://${FridgeApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
+  TableName:
+    Value: !Ref ItemsTable

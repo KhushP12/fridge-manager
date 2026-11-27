@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>What's in the fridge</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@400;600;800&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#dfe6ea; --steel:#c3ced5; --steel-d:#8d9ba5; --inside:#eef6f8; --glass:#a9d3dc;
+  --ink:#1d2a31; --muted:#51636d; --chip:#fff; --chip-b:#b7cbd3; --accent:#e4572e; --focus:#1b6ca8;
+}
+@media (prefers-color-scheme:dark){
+  :root{ --bg:#141b1f; --steel:#37444c; --steel-d:#5d6e79; --inside:#1f2b31; --glass:#2f5560;
+    --ink:#e8f1f4; --muted:#9db0ba; --chip:#2a3a42; --chip-b:#4a6470; --accent:#ff7a4d; --focus:#6bb8ee; }
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--ink);font-family:"Bricolage Grotesque",system-ui,sans-serif;
+  min-height:100vh;padding:24px 16px 48px;display:flex;flex-direction:column;align-items:center}
+h1{font-weight:800;font-size:clamp(1.6rem,4vw,2.2rem);margin:0 0 4px;letter-spacing:-.02em}
+.sub{margin:0 0 20px;color:var(--muted);font-size:1rem}
+.fridge{width:min(520px,100%);background:var(--steel);border-radius:26px;padding:16px;
+  border:2px solid var(--steel-d);position:relative}
+.handle{position:absolute;right:-10px;top:90px;width:10px;height:120px;border-radius:0 8px 8px 0;background:var(--steel-d)}
+.cabinet{background:var(--inside);border-radius:14px;border:2px solid var(--steel-d);overflow:hidden}
+.shelf{padding:12px 14px 0;min-height:110px;display:flex;flex-direction:column;justify-content:flex-end;
+  border-bottom:10px solid var(--glass);position:relative}
+.shelf:last-child{border-bottom:0;background:color-mix(in srgb,var(--glass) 25%,var(--inside))}
+.shelf h2{font-size:.85rem;font-weight:600;color:var(--muted);margin:0 0 8px}
+.items{display:flex;flex-wrap:wrap;gap:8px;padding-bottom:12px;align-items:center}
+.chip,.add{font:inherit;font-size:.95rem;border-radius:10px;padding:7px 12px;cursor:pointer;min-height:36px}
+.chip{background:var(--chip);color:var(--ink);border:1.5px solid var(--chip-b);display:inline-flex;gap:8px;align-items:center}
+.chip:hover{border-color:var(--accent)}
+.chip:hover::after{content:"remove";font-size:.75rem;color:var(--accent)}
+.add{background:transparent;color:var(--muted);border:1.5px dashed var(--steel-d)}
+.add:hover{color:var(--ink);border-color:var(--ink)}
+.chip:focus-visible,.add:focus-visible,input:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
+form{display:inline-flex;gap:6px}
+input{font:inherit;font-size:.95rem;padding:7px 10px;border-radius:10px;border:1.5px solid var(--focus);
+  background:var(--chip);color:var(--ink);width:150px;min-height:36px}
+.save{font:inherit;background:var(--ink);color:var(--bg);border:0;border-radius:10px;padding:0 12px;cursor:pointer;min-height:36px}
+.empty{color:var(--muted);font-size:.9rem}
+#status{margin-top:18px;min-height:1.4em;font-size:.95rem;color:var(--muted);text-align:center}
+#status.err{color:var(--accent);font-weight:600}
+@media (prefers-reduced-motion:no-preference){.chip{transition:border-color .15s}}
+</style>
+</head>
+<body>
+<h1>What's in the fridge</h1>
+<p class="sub">Tap + to add a food item to a shelf. Tap an item to take it out.</p>
+<div class="fridge"><div class="handle"></div><div class="cabinet" id="cabinet" aria-live="polite"></div></div>
+<p id="status" role="status"></p>
+
+<script>
+// After deploying the backend, paste the ApiUrl stack output here (no trailing slash).
+// While empty, the app runs in demo mode and keeps items in memory only.
+const API_URL = "https://p8rdgbh7ah.execute-api.eu-north-1.amazonaws.com";
+
+const SHELVES = ["Top shelf", "Middle shelf", "Lower shelf", "Crisper drawer"];
+let items = [];
+let adding = null; // shelf index with the add form open
+const statusEl = document.getElementById("status");
+const cabinet = document.getElementById("cabinet");
+
+function say(msg, isErr){ statusEl.textContent = msg || ""; statusEl.className = isErr ? "err" : ""; }
+
+async function api(method, path, body){
+  if(!API_URL){ return demo(method, path, body); }
+  const res = await fetch(API_URL + path, {
+    method, headers: body ? {"Content-Type":"application/json"} : undefined,
+    body: body ? JSON.stringify(body) : undefined
+  });
+  if(!res.ok){ let m = "Request failed"; try{ m = (await res.json()).error || m; }catch(e){} throw new Error(m); }
+  return res.json();
+}
+
+// In-memory stand-in so the UI works before the API exists.
+let demoItems = [
+  {id:"d1",name:"Milk",shelf:0},{id:"d2",name:"Eggs",shelf:1},{id:"d3",name:"Leftover pasta",shelf:2},{id:"d4",name:"Carrots",shelf:3}
+];
+async function demo(method, path, body){
+  if(method==="GET") return {items:[...demoItems]};
+  if(method==="POST"){ const it={id:"d"+Date.now(),name:body.name,shelf:body.shelf}; demoItems.push(it); return it; }
+  if(method==="DELETE"){ const id=path.split("/").pop(); demoItems=demoItems.filter(i=>i.id!==id); return {deleted:id}; }
+}
+
+function render(){
+  cabinet.replaceChildren();
+  SHELVES.forEach((label, s) => {
+    const shelf = document.createElement("section"); shelf.className = "shelf";
+    const h = document.createElement("h2"); h.textContent = label; shelf.append(h);
+    const row = document.createElement("div"); row.className = "items";
+    const here = items.filter(i => i.shelf === s);
+    here.forEach(it => {
+      const b = document.createElement("button"); b.className = "chip"; b.type = "button";
+      b.textContent = it.name; b.setAttribute("aria-label", "Remove " + it.name);
+      b.addEventListener("click", () => removeItem(it));
+      row.append(b);
+    });
+    if(adding === s){
+      const f = document.createElement("form");
+      const inp = document.createElement("input"); inp.maxLength = 40; inp.placeholder = "Item name"; inp.setAttribute("aria-label","Item name");
+      const ok = document.createElement("button"); ok.className = "save"; ok.textContent = "Add item";
+      f.append(inp, ok);
+      f.addEventListener("submit", e => { e.preventDefault(); addItem(s, inp.value); });
+      inp.addEventListener("keydown", e => { if(e.key==="Escape"){ adding=null; render(); } });
+      row.append(f);
+      setTimeout(() => inp.focus(), 0);
+    } else {
+      const a = document.createElement("button"); a.className = "add"; a.type = "button";
+      a.textContent = "+ Add to " + label.toLowerCase();
+      a.addEventListener("click", () => { adding = s; render(); });
+      row.append(a);
+    }
+    if(!here.length && adding !== s){ const e = document.createElement("span"); e.className = "empty"; e.textContent = "Empty"; row.prepend(e); }
+    shelf.append(row); cabinet.append(shelf);
+  });
+}
+
+async function load(){
+  say("Loading your fridge…");
+  try{ items = (await api("GET","/items")).items; say(API_URL ? "" : "Demo mode: changes are not saved. Set API_URL to connect the backend."); }
+  catch(e){ say("Couldn't load items. Check API_URL and reload. (" + e.message + ")", true); }
+  render();
+}
+async function addItem(shelf, raw){
+  const name = raw.trim();
+  if(!name){ say("Type an item name first.", true); return; }
+  try{ const it = await api("POST","/items",{name, shelf}); items.push(it); adding = null; say("Added " + it.name + "."); render(); }
+  catch(e){ say("Couldn't add " + name + ": " + e.message, true); }
+}
+async function removeItem(it){
+  try{ await api("DELETE","/items/" + encodeURIComponent(it.id)); items = items.filter(i => i.id !== it.id); say("Removed " + it.name + "."); render(); }
+  catch(e){ say("Couldn't remove " + it.name + ": " + e.message, true); }
+}
+load();
+</script>
+</body>
+</html>
